@@ -1,15 +1,14 @@
 /**
  * Algoman Server - Real-time Binance Data Dashboard
- * Serves the frontend and manages WebSocket connections for live data
+ * Pure Node.js implementation - NO Python required
  */
 
 const express = require('express');
 const http = require('http');
 const socketio = require('socket.io');
 const path = require('path');
-const { spawn } = require('child_process');
 const dotenv = require('dotenv');
-const os = require('os');
+const axios = require('axios');
 
 // Load environment variables
 dotenv.config();
@@ -25,123 +24,82 @@ const io = socketio(server, {
 
 // Configuration
 const PORT = process.env.PORT || 3000;
-const PYTHON_SCRIPT = path.join(__dirname, 'binance_live.py');
-const SYMBOLS = process.env.TRADING_SYMBOLS?.split(',') || ['BTCUSDT', 'ETHUSDT', 'BNBUSDT'];
-const UPDATE_INTERVAL = parseInt(process.env.UPDATE_INTERVAL) || 5000; // 5 seconds default
+const SYMBOLS = (process.env.TRADING_SYMBOLS || 'BTCUSDT,ETHUSDT,BNBUSDT').split(',').map(s => s.trim());
+const UPDATE_INTERVAL = parseInt(process.env.UPDATE_INTERVAL) || 5000;
 
-// Detect Python command based on OS
-const PYTHON_CMD = os.platform() === 'win32' ? 'python' : 'python3';
+// Binance API endpoints
+const BINANCE_API = 'https://api.binance.com/api/v3';
 
 // Middleware
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
 // Store active connections and data
-let pythonProcess = null;
 let connectedClients = new Set();
 let cachedData = {};
+let dataFetcherInterval = null;
 
 /**
- * Start Python process for fetching Binance data
+ * Fetch ticker data from Binance API
  */
-function startPythonDataFetcher() {
-    console.log(`[Server] Starting Python data fetcher (using: ${PYTHON_CMD})...`);
-    
-    pythonProcess = spawn(PYTHON_CMD, [PYTHON_SCRIPT], {
-        env: {
-            ...process.env,
-            PYTHONUNBUFFERED: '1'
-        }
-    });
-
-    pythonProcess.stdout.on('data', (data) => {
-        const output = data.toString().trim();
-        console.log(`[Python] ${output}`);
+async function fetchBinanceData() {
+    try {
+        const data = {};
         
-        // Try to parse JSON data from Python output
-        try {
-            const jsonData = JSON.parse(output);
-            if (jsonData && typeof jsonData === 'object') {
-                cachedData = jsonData;
-                // Broadcast to all connected clients
-                io.emit('binance-data', {
-                    data: jsonData,
-                    timestamp: new Date().toISOString()
+        for (const symbol of SYMBOLS) {
+            try {
+                const response = await axios.get(`${BINANCE_API}/ticker/24hr?symbol=${symbol}`, {
+                    timeout: 5000
                 });
+                
+                const ticker = response.data;
+                
+                data[symbol] = {
+                    symbol: symbol,
+                    price: parseFloat(ticker.lastPrice),
+                    high: parseFloat(ticker.highPrice),
+                    low: parseFloat(ticker.lowPrice),
+                    volume: parseFloat(ticker.volume),
+                    priceChange: parseFloat(ticker.priceChange),
+                    priceChangePercent: parseFloat(ticker.priceChangePercent),
+                    bidPrice: parseFloat(ticker.bidPrice),
+                    askPrice: parseFloat(ticker.askPrice),
+                    openPrice: parseFloat(ticker.openPrice),
+                    closePrice: parseFloat(ticker.lastPrice),
+                    count: parseInt(ticker.count),
+                    timestamp: new Date().toISOString()
+                };
+                
+                console.log(`[Binance] ${symbol}: $${data[symbol].price}`);
+            } catch (err) {
+                console.error(`[Binance Error] Failed to fetch ${symbol}: ${err.message}`);
             }
-        } catch (e) {
-            // Not JSON, just a log message
         }
-    });
-
-    pythonProcess.stderr.on('data', (data) => {
-        console.error(`[Python Error] ${data.toString()}`);
-    });
-
-    pythonProcess.on('close', (code) => {
-        console.log(`[Server] Python process exited with code ${code}`);
-        pythonProcess = null;
         
-        // Restart after 5 seconds if it crashes
-        if (code !== 0) {
-            console.log('[Server] Restarting Python process in 5 seconds...');
-            setTimeout(startPythonDataFetcher, 5000);
+        if (Object.keys(data).length > 0) {
+            cachedData = data;
+            // Broadcast to all connected clients
+            io.emit('binance-data', {
+                data: data,
+                timestamp: new Date().toISOString()
+            });
         }
-    });
-
-    pythonProcess.on('error', (err) => {
-        console.error(`[Server] Failed to start Python process: ${err.message}`);
-        console.log(`[Server] Make sure ${PYTHON_CMD} and dependencies are installed`);
-        console.log('[Server] Run: python -m pip install -r requirements.txt');
-    });
+    } catch (err) {
+        console.error(`[Binance Error] ${err.message}`);
+    }
 }
 
 /**
- * Mock data fetcher (fallback when Python is not available)
+ * Start data fetcher
  */
-function generateMockData() {
-    const data = {};
-    SYMBOLS.forEach(symbol => {
-        const basePrice = {
-            'BTCUSDT': 65000,
-            'ETHUSDT': 3500,
-            'BNBUSDT': 600
-        }[symbol] || 1000;
-        
-        const change = (Math.random() - 0.5) * 100;
-        const price = basePrice + change;
-        
-        data[symbol] = {
-            symbol: symbol,
-            price: parseFloat(price.toFixed(2)),
-            high: parseFloat((price * 1.02).toFixed(2)),
-            low: parseFloat((price * 0.98).toFixed(2)),
-            volume: parseFloat((Math.random() * 10000).toFixed(2)),
-            priceChange: parseFloat(change.toFixed(2)),
-            priceChangePercent: parseFloat(((change / basePrice) * 100).toFixed(2)),
-            bidPrice: parseFloat((price * 0.999).toFixed(2)),
-            askPrice: parseFloat((price * 1.001).toFixed(2)),
-            timestamp: new Date().toISOString()
-        };
-    });
-    return data;
-}
-
-/**
- * Start mock data broadcaster (for development/fallback)
- */
-function startMockDataBroadcaster() {
-    console.log('[Server] Starting mock data broadcaster (development mode)');
-    console.log('[Server] ⚠️  Using MOCK data. Real Binance data requires Python.');
+function startDataFetcher() {
+    console.log('[Server] Starting Binance data fetcher (Node.js)...');
     
-    setInterval(() => {
-        const mockData = generateMockData();
-        io.emit('binance-data', {
-            data: mockData,
-            timestamp: new Date().toISOString(),
-            isMock: true
-        });
-    }, UPDATE_INTERVAL);
+    // Fetch immediately
+    fetchBinanceData();
+    
+    // Then fetch at intervals
+    dataFetcherInterval = setInterval(fetchBinanceData, UPDATE_INTERVAL);
 }
 
 // Routes
@@ -163,9 +121,9 @@ app.get('/api/data', (req, res) => {
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
-        pythonProcessRunning: pythonProcess !== null,
         connectedClients: connectedClients.size,
-        cachedSymbols: Object.keys(cachedData)
+        cachedSymbols: Object.keys(cachedData),
+        dataSource: 'Binance REST API (Node.js)'
     });
 });
 
@@ -209,7 +167,6 @@ io.on('connection', (socket) => {
         connectedClients.delete(socket.id);
     });
 
-    // Handle errors
     socket.on('error', (error) => {
         console.error(`[WebSocket Error] ${socket.id}: ${error}`);
     });
@@ -228,8 +185,8 @@ app.use((err, req, res, next) => {
 process.on('SIGINT', () => {
     console.log('\n[Server] Shutting down gracefully...');
     
-    if (pythonProcess) {
-        pythonProcess.kill();
+    if (dataFetcherInterval) {
+        clearInterval(dataFetcherInterval);
     }
     
     server.close(() => {
@@ -248,17 +205,10 @@ server.listen(PORT, () => {
     console.log(`[Server] Configuration:`);
     console.log(`  - Symbols: ${SYMBOLS.join(', ')}`);
     console.log(`  - Update Interval: ${UPDATE_INTERVAL}ms`);
-    console.log(`  - Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`  - Python Command: ${PYTHON_CMD}\n`);
+    console.log(`  - Data Source: Binance REST API (Node.js)`);
+    console.log(`  - Dashboard: http://localhost:${PORT}\n`);
 
-    // Try to start Python data fetcher
-    // If it fails, fall back to mock data
-    try {
-        startPythonDataFetcher();
-    } catch (err) {
-        console.warn('[Server] Python process unavailable, using mock data');
-        startMockDataBroadcaster();
-    }
+    startDataFetcher();
 });
 
 module.exports = { io, app, server };
