@@ -9,6 +9,7 @@ const socketio = require('socket.io');
 const path = require('path');
 const { spawn } = require('child_process');
 const dotenv = require('dotenv');
+const os = require('os');
 
 // Load environment variables
 dotenv.config();
@@ -28,6 +29,9 @@ const PYTHON_SCRIPT = path.join(__dirname, 'binance_live.py');
 const SYMBOLS = process.env.TRADING_SYMBOLS?.split(',') || ['BTCUSDT', 'ETHUSDT', 'BNBUSDT'];
 const UPDATE_INTERVAL = parseInt(process.env.UPDATE_INTERVAL) || 5000; // 5 seconds default
 
+// Detect Python command based on OS
+const PYTHON_CMD = os.platform() === 'win32' ? 'python' : 'python3';
+
 // Middleware
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
@@ -41,9 +45,9 @@ let cachedData = {};
  * Start Python process for fetching Binance data
  */
 function startPythonDataFetcher() {
-    console.log('[Server] Starting Python data fetcher...');
+    console.log(`[Server] Starting Python data fetcher (using: ${PYTHON_CMD})...`);
     
-    pythonProcess = spawn('python3', [PYTHON_SCRIPT], {
+    pythonProcess = spawn(PYTHON_CMD, [PYTHON_SCRIPT], {
         env: {
             ...process.env,
             PYTHONUNBUFFERED: '1'
@@ -87,7 +91,8 @@ function startPythonDataFetcher() {
 
     pythonProcess.on('error', (err) => {
         console.error(`[Server] Failed to start Python process: ${err.message}`);
-        console.log('[Server] Make sure python3 and dependencies are installed');
+        console.log(`[Server] Make sure ${PYTHON_CMD} and dependencies are installed`);
+        console.log('[Server] Run: python -m pip install -r requirements.txt');
     });
 }
 
@@ -127,6 +132,7 @@ function generateMockData() {
  */
 function startMockDataBroadcaster() {
     console.log('[Server] Starting mock data broadcaster (development mode)');
+    console.log('[Server] ⚠️  Using MOCK data. Real Binance data requires Python.');
     
     setInterval(() => {
         const mockData = generateMockData();
@@ -242,7 +248,8 @@ server.listen(PORT, () => {
     console.log(`[Server] Configuration:`);
     console.log(`  - Symbols: ${SYMBOLS.join(', ')}`);
     console.log(`  - Update Interval: ${UPDATE_INTERVAL}ms`);
-    console.log(`  - Environment: ${process.env.NODE_ENV || 'development'}\n`);
+    console.log(`  - Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`  - Python Command: ${PYTHON_CMD}\n`);
 
     // Try to start Python data fetcher
     // If it fails, fall back to mock data
